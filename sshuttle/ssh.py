@@ -3,7 +3,7 @@ import os
 import re
 import socket
 import zlib
-import imp
+import importlib
 import subprocess as ssubprocess
 import shlex
 import sshuttle.helpers as helpers
@@ -17,47 +17,32 @@ except ImportError:
     from pipes import quote
 
 
-def readfile(name):
-    tokens = name.split(".")
-    f = None
+def readfile(module_name):
+    spec = importlib.util.find_spec(module_name)
+    if spec is None:
+        raise RuntimeError('Unknown module "%s".' % module_name)
+    assert isinstance(spec.loader, importlib.abc.InspectLoader)
 
-    token = tokens[0]
-    token_name = [token]
-    token_str = ".".join(token_name)
+    body = spec.loader.get_source(module_name)
+    assert body is not None
+    encoded_body = body.encode('utf-8')
+    is_pkg = spec.submodule_search_locations is not None
 
-    try:
-        f, pathname, description = imp.find_module(token_str)
+    return encoded_body, is_pkg
 
-        for token in tokens[1:]:
-            module = imp.load_module(token_str, f, pathname, description)
-            if f is not None:
-                f.close()
-
-            token_name.append(token)
-            token_str = ".".join(token_name)
-
-            f, pathname, description = imp.find_module(
-                token, module.__path__)
-
-        if f is not None:
-            contents = f.read()
-        else:
-            contents = ""
-
-    finally:
-        if f is not None:
-            f.close()
-
-    return contents.encode("UTF8")
-
-
-def empackage(z, name, data=None):
+# The complement to empackage() is the parser in StreamImporter() in
+# assembler.py.
+def empackage(z, name, data, is_pkg):
     if not data:
-        data = readfile(name)
+        data, is_pkg = readfile(name)
     content = z.compress(data)
     content += z.flush(zlib.Z_SYNC_FLUSH)
 
-    return b'%s\n%d\n%s' % (name.encode("ASCII"), len(content), content)
+    return b'%s\n%s\n%d\n%s' % (
+        name.encode('utf-8'),
+        (b'True' if is_pkg else b'False'),
+        len(content),
+        content)
 
 
 def connect(ssh_cmd, rhostport, python, stderr, options):
@@ -89,7 +74,7 @@ def connect(ssh_cmd, rhostport, python, stderr, options):
     optdata = ''.join("%s=%r\n" % (k, v) for (k, v) in list(options.items()))
     optdata = optdata.encode("UTF8")
     content2 = (empackage(z, 'sshuttle') +
-                empackage(z, 'sshuttle.cmdline_options', optdata) +
+                empackage(z, 'sshuttle.cmdline_options', optdata, False) +
                 empackage(z, 'sshuttle.helpers') +
                 empackage(z, 'sshuttle.ssnet') +
                 empackage(z, 'sshuttle.hostwatch') +
